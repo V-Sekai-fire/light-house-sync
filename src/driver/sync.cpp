@@ -1311,6 +1311,24 @@ bool Solver::Acquire(double now, X4 &best, int &bs, int &tight) {
                       [&](size_t a, size_t b) { return SecondBest(&c2[a * K], K) > SecondBest(&c2[b * K], K); });
     for (size_t i = 0; i < n2; i++) cand.push_back(top[o2[i]]);
   }
+  // Reliable-lock fix: seed a full yaw grid over the accumulated window, so the globally-correct
+  // orientation is always among the candidates (the 2-ray hypotheses can miss it when stations are
+  // never seen at once -> the mirror that keeps acquisition from locking). Each seed places the
+  // station centroid at the mean ray origin; the refine+Support+CheckMirror below pick the winner.
+  if (UseLbfgsb()) {
+    V3 cS;
+    for (auto &s : S) cS = cS + s;
+    cS = cS * (1.0 / S.size());
+    V3 meanO;
+    for (size_t i = 0; i < r.size(); i++) meanO = meanO + r.O[i];
+    if (r.size()) meanO = meanO * (1.0 / r.size());
+    const int G = 12;  // every 30 deg
+    for (int g = 0; g < G; g++) {
+      double yaw = -3.14159265358979 + (2 * 3.14159265358979) * g / G;
+      V3 t = meanO - Ry(yaw) * cS;
+      cand.push_back(X4{yaw, t.x, t.y, t.z});
+    }
+  }
   bs = -1;
   bool have = false;
   for (X4 x : cand) {
@@ -1694,6 +1712,28 @@ StepStat Solver::Step(double /*now*/) {
     std::vector<int> c;
     for (auto &kv : st.per) c.push_back(kv.second);
     locked = Score(c) >= 10;
+  }
+  // Readiness cue (flag-gated): acquisition triangulates the base stations from the spread of head
+  // positions; standing still -> shallow baseline -> the conditioning check won't pin a lock. Tell the
+  // user to move instead of silently "acquiring" forever.
+  if (UseLbfgsb() && !locked && now - last_hint_ > 5.0) {
+    last_hint_ = now;
+    Rays hr = GetRays(std::max(now - ACQ_WIN, since_));
+    V3 lo{1e9, 1e9, 1e9}, hi{-1e9, -1e9, -1e9};
+    for (size_t n = 0; n < hr.size(); n++) {
+      lo.x = std::min(lo.x, hr.O[n].x); lo.y = std::min(lo.y, hr.O[n].y); lo.z = std::min(lo.z, hr.O[n].z);
+      hi.x = std::max(hi.x, hr.O[n].x); hi.y = std::max(hi.y, hr.O[n].y); hi.z = std::max(hi.z, hr.O[n].z);
+    }
+    double baseline = hr.size() ? norm(hi - lo) : 0.0;
+    int nstat = (int)S.size();
+    if (nstat >= 2) {
+      if (baseline < 0.30)
+        log_(Fmt("to lock: walk a step and look around - the cameras need the base stations from different spots "
+                 "(parallax %.0f cm, want >30; %d stations on)", baseline * 100, nstat));
+      else
+        log_(Fmt("to lock: keep the base stations in view while you move (parallax %.0f cm, %d stations) - "
+                 "resolving the orientation", baseline * 100, nstat));
+    }
   }
   if (now - last_acq_ > (locked ? 10 : 3)) {
     last_acq_ = now;

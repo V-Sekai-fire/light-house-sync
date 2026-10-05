@@ -310,6 +310,7 @@ class Solver {
   bool has_x_ = false, has_anchor_ = false, has_acq_x_ = false;
   X4 x_{}, anchor_{}, acq_x_{};
   double since_ = -1e18, brk_ = -1e18, last_acq_ = -1e18, seen_ = -1e18, last_id_ = -1e18;
+  double last_hint_ = -1e18;  // rate-limit the acquisition parallax/coverage readiness hint
   std::atomic<double> frame_p_{0};
   struct CamFrame { double t, g; int cam; V3 o; M3 R; };
   std::deque<CamFrame> frames_;
