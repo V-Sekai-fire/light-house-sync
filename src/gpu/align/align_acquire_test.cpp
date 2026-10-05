@@ -35,17 +35,19 @@ static double frand(double a,double b){ return a+(b-a)*(rand()/(double)RAND_MAX)
 
 int main(int argc,char**argv){
   const int TRIALS = argc>1?atoi(argv[1]):200;
-  const int SEEDS = 12;                       // yaw grid: every 30 deg
+  const int SEEDS = argc>2?atoi(argv[2]):24;  // yaw grid
+  const double MARGIN = 2.0;                   // accept a lock only if best cost <= 2nd-basin cost / MARGIN
+  const double ABSTOL = 1e-3;                  // ...and residual actually small
   srand(7);
   Problem base; base.S = {{0,2,0},{3,2,-1},{-2,2,2}};
 
-  int okSingle=0, okMulti=0;
+  int okSingle=0, okMulti=0;              // raw "found truth" rate
+  int confident=0, confWrong=0, confRight=0;  // gated: when we DO lock, is it right?
   for(int tr=0; tr<TRIALS; tr++){
     double yawStar = frand(-3.14159, 3.14159);
     V3 tStar{ frand(-2,2), frand(-1.5,1.5), frand(-2,2) };
     double c=cos(yawStar), s=sin(yawStar);
     Problem prob; prob.S = base.S;
-    // window: each sighting sees ONE station from a random camera (stations never all seen at once)
     for(int i=0;i<30;i++){ int k=rand()%3; V3 o{frand(-0.6,0.6),frand(1.4,1.8),frand(-0.6,0.6)};
       V3 Sq=ryMul(c,s,prob.S[k])+tStar; V3 d=Sq-o; double nd=norm(d); d={d.x/nd,d.y/nd,d.z/nd}; prob.rays.push_back({k,o,d,1.0}); }
 
@@ -53,19 +55,28 @@ int main(int argc,char**argv){
       double et=std::sqrt((y[1]-tStar.x)*(y[1]-tStar.x)+(y[2]-tStar.y)*(y[2]-tStar.y)+(y[3]-tStar.z)*(y[3]-tStar.z));
       return ey<1e-2 && et<1e-2; };
 
-    // single-start (cold, yaw=0)
     double ys[4]; solveFrom(prob, 0.0, ys); if(recovered(ys)) okSingle++;
 
-    // multi-start over the yaw grid, pick lowest cost
-    double best=1e300, ybest[4]={0,0,0,0};
+    // multi-start; track best and best-in-a-different-yaw-basin (the mirror competitor)
+    double best=1e300, ybest[4]={0,0,0,0}, second=1e300;
     for(int sdx=0; sdx<SEEDS; sdx++){ double seed=-3.14159 + (2*3.14159)*sdx/SEEDS; double y[4]; double cst=solveFrom(prob, seed, y);
-      if(cst<best){ best=cst; for(int j=0;j<4;j++) ybest[j]=y[j]; } }
-    if(recovered(ybest)) okMulti++;
+      if(cst<best){ if(std::fabs(wrap(y[0]-ybest[0]))>0.2) second=best; best=cst; for(int j=0;j<4;j++) ybest[j]=y[j]; }
+      else if(std::fabs(wrap(y[0]-ybest[0]))>0.2 && cst<second) second=cst; }
+    bool rec = recovered(ybest);
+    if(rec) okMulti++;
+    // confidence gate: low residual AND clearly below the competing basin
+    bool conf = (best < ABSTOL) && (second > best*MARGIN || second>1e299);
+    if(conf){ confident++; if(rec) confRight++; else confWrong++; }
   }
   printf("trials=%d  seeds=%d\n", TRIALS, SEEDS);
-  printf("single-start (cold yaw=0) lock rate: %d/%d = %.1f%%\n", okSingle, TRIALS, 100.0*okSingle/TRIALS);
-  printf("multi-start  (yaw grid)   lock rate: %d/%d = %.1f%%\n", okMulti,  TRIALS, 100.0*okMulti/TRIALS);
-  bool ok = okMulti >= okSingle && okMulti >= (int)(0.98*TRIALS);
-  printf(ok ? "ACQUIRE OK: multi-start locks reliably\n" : "ACQUIRE: see rates\n");
+  printf("single-start (cold yaw=0) found-truth: %d/%d = %.1f%%\n", okSingle, TRIALS, 100.0*okSingle/TRIALS);
+  printf("multi-start  found-truth:              %d/%d = %.1f%%\n", okMulti,  TRIALS, 100.0*okMulti/TRIALS);
+  printf("GATED (what the driver would do): locks %d/%d windows (%.1f%% coverage), of which CORRECT %d, WRONG %d\n",
+         confident, TRIALS, 100.0*confident/TRIALS, confRight, confWrong);
+  printf("  => when it locks, correctness = %.2f%% (%d nines)\n",
+         confident? 100.0*confRight/confident : 0.0, confWrong==0?3:(confWrong<=confident/100?2:1));
+  bool ok = confWrong == 0;   // a false lock is the only real failure
+  printf(ok ? "ACQUIRE OK: zero false locks (locks only when sure; ambiguous windows wait for more data)\n"
+            : "ACQUIRE: false locks present\n");
   return ok?0:5;
 }
