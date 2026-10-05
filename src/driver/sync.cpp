@@ -17,8 +17,7 @@
 
 static const double kInf = std::numeric_limits<double>::infinity();
 
-// Flag: swap Fit's Levenberg-Marquardt inner loop for the ported L-BFGS-B over the same objective
-// (parity by shared cost). Set by replay's --lbfgsb flag or the driver's "lbfgsb" vrsetting.
+// Ported L-BFGS-B in Fit instead of LM (replay --lbfgsb / "lbfgsb" vrsetting).
 static bool g_useLbfgsb = false;
 void SetSolverLbfgsb(bool on) { g_useLbfgsb = on; }
 static bool UseLbfgsb() { return g_useLbfgsb; }
@@ -1060,8 +1059,7 @@ Solver::FitR Solver::Fit(const X4 &x0, const std::vector<V3> &S, const std::vect
   std::vector<double> rv, J, rn;
   res(y, rv);
   if (UseLbfgsb()) {
-    // Same objective as the LM path; L-BFGS-B over np DOF. Box: yaw +-pi about x0, translation +-5 m
-    // (tilt +-0.5 rad with a pivot). Gradient by central difference of cost (h=1e-7), as jac uses.
+    // Same objective as the LM path, L-BFGS-B over np DOF; central-difference gradient, box bounds.
     float yf[kMaxDof], lo[kMaxDof], hi[kMaxDof];
     for (int j = 0; j < np; j++) yf[j] = (float)y[j];
     lo[0] = (float)(y[0] - 3.14159265); hi[0] = (float)(y[0] + 3.14159265);
@@ -1311,10 +1309,7 @@ bool Solver::Acquire(double now, X4 &best, int &bs, int &tight) {
                       [&](size_t a, size_t b) { return SecondBest(&c2[a * K], K) > SecondBest(&c2[b * K], K); });
     for (size_t i = 0; i < n2; i++) cand.push_back(top[o2[i]]);
   }
-  // Reliable-lock fix: seed a full yaw grid over the accumulated window, so the globally-correct
-  // orientation is always among the candidates (the 2-ray hypotheses can miss it when stations are
-  // never seen at once -> the mirror that keeps acquisition from locking). Each seed places the
-  // station centroid at the mean ray origin; the refine+Support+CheckMirror below pick the winner.
+  // Seed a yaw grid so the correct orientation is always a candidate (breaks the acquisition mirror).
   if (UseLbfgsb()) {
     V3 cS;
     for (auto &s : S) cS = cS + s;
@@ -1713,9 +1708,7 @@ StepStat Solver::Step(double /*now*/) {
     for (auto &kv : st.per) c.push_back(kv.second);
     locked = Score(c) >= 10;
   }
-  // Readiness cue (flag-gated): acquisition triangulates the base stations from the spread of head
-  // positions; standing still -> shallow baseline -> the conditioning check won't pin a lock. Tell the
-  // user to move instead of silently "acquiring" forever.
+  // Readiness cue: is there enough parallax (head-position spread) to triangulate the stations?
   if (UseLbfgsb() && !locked && now - last_hint_ > 5.0) {
     last_hint_ = now;
     Rays hr = GetRays(std::max(now - ACQ_WIN, since_));
