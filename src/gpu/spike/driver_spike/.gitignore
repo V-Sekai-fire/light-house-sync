@@ -1,0 +1,6 @@
+*.spv
+*.exe
+*.dll
+*.obj
+*.o
+vkspike/

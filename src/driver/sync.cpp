@@ -12,7 +12,15 @@
 
 #include "json.h"
 
+#include "../gpu/lbfgsb/lbfgsb.h"
+#include "../gpu/lbfgsb/vec_cpu.h"
+
 static const double kInf = std::numeric_limits<double>::infinity();
+
+// Ported L-BFGS-B in Fit instead of LM (replay --lbfgsb / "lbfgsb" vrsetting).
+static bool g_useLbfgsb = false;
+void SetSolverLbfgsb(bool on) { g_useLbfgsb = on; }
+static bool UseLbfgsb() { return g_useLbfgsb; }
 
 static std::string Fmt(const char *fmt, ...) {
   char buf[1024];
@@ -1050,6 +1058,36 @@ Solver::FitR Solver::Fit(const X4 &x0, const std::vector<V3> &S, const std::vect
   double y[kMaxDof] = {x0[0], 0, 0, 0, 0, 0};
   std::vector<double> rv, J, rn;
   res(y, rv);
+  if (UseLbfgsb()) {
+    // Same objective as the LM path, L-BFGS-B over np DOF; central-difference gradient, box bounds.
+    float yf[kMaxDof], lo[kMaxDof], hi[kMaxDof];
+    for (int j = 0; j < np; j++) yf[j] = (float)y[j];
+    lo[0] = (float)(y[0] - 3.14159265); hi[0] = (float)(y[0] + 3.14159265);
+    for (int j = 1; j < np; j++) { double b = pivot ? 0.5 : 5.0; lo[j] = (float)(y[j] - b); hi[j] = (float)(y[j] + b); }
+    VecCpu vec; Lbfgsb solver(vec); LbfgsbParams lp; lp.max_iterations = 200;
+    Lbfgsb::Status st = solver.start((uint32_t)np, yf, lo, hi, lp);
+    std::vector<float> xf; int guard = 0;
+    while (st != Lbfgsb::CONVERGED && st != Lbfgsb::FAIL && guard++ < 100000) {
+      if (st == Lbfgsb::NEED_EVAL || st == Lbfgsb::TRY) {
+        solver.readX(xf);
+        double yy[kMaxDof] = {}; for (int j = 0; j < np; j++) yy[j] = xf[j];
+        std::vector<double> rr; res(yy, rr); double ff = cost(rr);
+        double gg[kMaxDof] = {}; const double hh = 1e-7;
+        for (int j = 0; j < np; j++) {
+          double yp2[kMaxDof], ym2[kMaxDof];
+          memcpy(yp2, yy, sizeof yp2); memcpy(ym2, yy, sizeof ym2);
+          yp2[j] += hh; ym2[j] -= hh;
+          std::vector<double> rp2, rm2; res(yp2, rp2); res(ym2, rm2);
+          gg[j] = (cost(rp2) - cost(rm2)) / (2 * hh);
+        }
+        float gf[kMaxDof]; for (int j = 0; j < np; j++) gf[j] = (float)gg[j];
+        solver.setGradient(gf);
+        st = solver.next(ff);
+      } else st = solver.next();
+    }
+    solver.readX(xf); for (int j = 0; j < np; j++) y[j] = xf[j];
+    res(y, rv);
+  } else {
   double cst = cost(rv), lam = 1e-3;
   for (int it = 0; it < 100; it++) {
     jac(y, J);
@@ -1091,6 +1129,7 @@ Solver::FitR Solver::Fit(const X4 &x0, const std::vector<V3> &S, const std::vect
       if (lam > 1e12) break;
     }
     if (!moved || done) break;
+  }
   }
   // conditioning: scipy's loss-scaled Jacobian of the sighting rows ((1+z)^-3/2 for soft_l1), per-DOF scale / SIG_R
   jac(y, J);
@@ -1269,6 +1308,21 @@ bool Solver::Acquire(double now, X4 &best, int &bs, int &tight) {
     std::partial_sort(o2.begin(), o2.begin() + n2, o2.end(),
                       [&](size_t a, size_t b) { return SecondBest(&c2[a * K], K) > SecondBest(&c2[b * K], K); });
     for (size_t i = 0; i < n2; i++) cand.push_back(top[o2[i]]);
+  }
+  // Seed a yaw grid so the correct orientation is always a candidate (breaks the acquisition mirror).
+  if (UseLbfgsb()) {
+    V3 cS;
+    for (auto &s : S) cS = cS + s;
+    cS = cS * (1.0 / S.size());
+    V3 meanO;
+    for (size_t i = 0; i < r.size(); i++) meanO = meanO + r.O[i];
+    if (r.size()) meanO = meanO * (1.0 / r.size());
+    const int G = 12;  // every 30 deg
+    for (int g = 0; g < G; g++) {
+      double yaw = -3.14159265358979 + (2 * 3.14159265358979) * g / G;
+      V3 t = meanO - Ry(yaw) * cS;
+      cand.push_back(X4{yaw, t.x, t.y, t.z});
+    }
   }
   bs = -1;
   bool have = false;
@@ -1653,6 +1707,26 @@ StepStat Solver::Step(double /*now*/) {
     std::vector<int> c;
     for (auto &kv : st.per) c.push_back(kv.second);
     locked = Score(c) >= 10;
+  }
+  // Readiness cue: is there enough parallax (head-position spread) to triangulate the stations?
+  if (UseLbfgsb() && !locked && now - last_hint_ > 5.0) {
+    last_hint_ = now;
+    Rays hr = GetRays(std::max(now - ACQ_WIN, since_));
+    V3 lo{1e9, 1e9, 1e9}, hi{-1e9, -1e9, -1e9};
+    for (size_t n = 0; n < hr.size(); n++) {
+      lo.x = std::min(lo.x, hr.O[n].x); lo.y = std::min(lo.y, hr.O[n].y); lo.z = std::min(lo.z, hr.O[n].z);
+      hi.x = std::max(hi.x, hr.O[n].x); hi.y = std::max(hi.y, hr.O[n].y); hi.z = std::max(hi.z, hr.O[n].z);
+    }
+    double baseline = hr.size() ? norm(hi - lo) : 0.0;
+    int nstat = (int)S.size();
+    if (nstat >= 2) {
+      if (baseline < 0.30)
+        log_(Fmt("to lock: walk a step and look around - the cameras need the base stations from different spots "
+                 "(parallax %.0f cm, want >30; %d stations on)", baseline * 100, nstat));
+      else
+        log_(Fmt("to lock: keep the base stations in view while you move (parallax %.0f cm, %d stations) - "
+                 "resolving the orientation", baseline * 100, nstat));
+    }
   }
   if (now - last_acq_ > (locked ? 10 : 3)) {
     last_acq_ = now;

@@ -75,6 +75,9 @@ constexpr double kBodyMoved = 2.0, kBodyCorr = 0.2;  // m, correlation
 
 double RotorPeriod(int channel);  // s, a 2.0 base station on channel 1..16, else 0
 
+// Use the ported L-BFGS-B in Fit instead of Levenberg-Marquardt (replay --lbfgsb / "lbfgsb" vrsetting).
+void SetSolverLbfgsb(bool on);
+
 // ---------------------------------------------------------------- optics
 struct CamCal {
   bool valid = false;
@@ -307,6 +310,7 @@ class Solver {
   bool has_x_ = false, has_anchor_ = false, has_acq_x_ = false;
   X4 x_{}, anchor_{}, acq_x_{};
   double since_ = -1e18, brk_ = -1e18, last_acq_ = -1e18, seen_ = -1e18, last_id_ = -1e18;
+  double last_hint_ = -1e18;  // readiness-hint rate limit
   std::atomic<double> frame_p_{0};
   struct CamFrame { double t, g; int cam; V3 o; M3 R; };
   std::deque<CamFrame> frames_;

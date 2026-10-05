@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
     else if (a == "--xf" && i + 1 < argc) xfp = argv[++i];
     else if (a == "--rays" && i + 1 < argc) g_ray_dump = fopen(argv[++i], "w");  // every sighting + the stations
     else if (a == "--expo" && i + 1 < argc) expo = atof(argv[++i]);
+    else if (a == "--lbfgsb") SetSolverLbfgsb(true);
     else if (a == "--learn") learn = true;
     else if (a == "--learn-grid") learn_grid = true;
     else if (a == "--pings") pings = true;

@@ -442,6 +442,8 @@ class Provider : public vr::IServerTrackedDeviceProvider {
     g_gravity->SetEnabled(e != vr::VRSettingsError_None || grav);
     bool rec = s->GetBool(kSection, "record", &e);
     SetRecording(e == vr::VRSettingsError_None && rec);
+    bool lb = s->GetBool(kSection, "lbfgsb", &e);
+    SetSolverLbfgsb(e == vr::VRSettingsError_None && lb);
   }
 
   void SetRecording(bool on) {
