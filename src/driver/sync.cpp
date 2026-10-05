@@ -12,7 +12,16 @@
 
 #include "json.h"
 
+#include "../gpu/lbfgsb/lbfgsb.h"
+#include "../gpu/lbfgsb/vec_cpu.h"
+
 static const double kInf = std::numeric_limits<double>::infinity();
+
+// Flag: swap Fit's Levenberg-Marquardt inner loop for the ported L-BFGS-B over the same objective
+// (parity by shared cost). Set by replay's --lbfgsb flag or the driver's "lbfgsb" vrsetting.
+static bool g_useLbfgsb = false;
+void SetSolverLbfgsb(bool on) { g_useLbfgsb = on; }
+static bool UseLbfgsb() { return g_useLbfgsb; }
 
 static std::string Fmt(const char *fmt, ...) {
   char buf[1024];
@@ -1050,6 +1059,37 @@ Solver::FitR Solver::Fit(const X4 &x0, const std::vector<V3> &S, const std::vect
   double y[kMaxDof] = {x0[0], 0, 0, 0, 0, 0};
   std::vector<double> rv, J, rn;
   res(y, rv);
+  if (UseLbfgsb()) {
+    // Same objective as the LM path; L-BFGS-B over np DOF. Box: yaw +-pi about x0, translation +-5 m
+    // (tilt +-0.5 rad with a pivot). Gradient by central difference of cost (h=1e-7), as jac uses.
+    float yf[kMaxDof], lo[kMaxDof], hi[kMaxDof];
+    for (int j = 0; j < np; j++) yf[j] = (float)y[j];
+    lo[0] = (float)(y[0] - 3.14159265); hi[0] = (float)(y[0] + 3.14159265);
+    for (int j = 1; j < np; j++) { double b = pivot ? 0.5 : 5.0; lo[j] = (float)(y[j] - b); hi[j] = (float)(y[j] + b); }
+    VecCpu vec; Lbfgsb solver(vec); LbfgsbParams lp; lp.max_iterations = 200;
+    Lbfgsb::Status st = solver.start((uint32_t)np, yf, lo, hi, lp);
+    std::vector<float> xf; int guard = 0;
+    while (st != Lbfgsb::CONVERGED && st != Lbfgsb::FAIL && guard++ < 100000) {
+      if (st == Lbfgsb::NEED_EVAL || st == Lbfgsb::TRY) {
+        solver.readX(xf);
+        double yy[kMaxDof] = {}; for (int j = 0; j < np; j++) yy[j] = xf[j];
+        std::vector<double> rr; res(yy, rr); double ff = cost(rr);
+        double gg[kMaxDof] = {}; const double hh = 1e-7;
+        for (int j = 0; j < np; j++) {
+          double yp2[kMaxDof], ym2[kMaxDof];
+          memcpy(yp2, yy, sizeof yp2); memcpy(ym2, yy, sizeof ym2);
+          yp2[j] += hh; ym2[j] -= hh;
+          std::vector<double> rp2, rm2; res(yp2, rp2); res(ym2, rm2);
+          gg[j] = (cost(rp2) - cost(rm2)) / (2 * hh);
+        }
+        float gf[kMaxDof]; for (int j = 0; j < np; j++) gf[j] = (float)gg[j];
+        solver.setGradient(gf);
+        st = solver.next(ff);
+      } else st = solver.next();
+    }
+    solver.readX(xf); for (int j = 0; j < np; j++) y[j] = xf[j];
+    res(y, rv);
+  } else {
   double cst = cost(rv), lam = 1e-3;
   for (int it = 0; it < 100; it++) {
     jac(y, J);
@@ -1091,6 +1131,7 @@ Solver::FitR Solver::Fit(const X4 &x0, const std::vector<V3> &S, const std::vect
       if (lam > 1e12) break;
     }
     if (!moved || done) break;
+  }
   }
   // conditioning: scipy's loss-scaled Jacobian of the sighting rows ((1+z)^-3/2 for soft_l1), per-DOF scale / SIG_R
   jac(y, J);

@@ -75,6 +75,9 @@ constexpr double kBodyMoved = 2.0, kBodyCorr = 0.2;  // m, correlation
 
 double RotorPeriod(int channel);  // s, a 2.0 base station on channel 1..16, else 0
 
+// Use the ported L-BFGS-B in Fit instead of Levenberg-Marquardt (replay --lbfgsb / "lbfgsb" vrsetting).
+void SetSolverLbfgsb(bool on);
+
 // ---------------------------------------------------------------- optics
 struct CamCal {
   bool valid = false;
